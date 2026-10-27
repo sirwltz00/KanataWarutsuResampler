@@ -1,0 +1,221 @@
+name: Build Kanata Warutsu Resampler (DLL only)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      mobile_ref:
+        description: OpenUtau Mobile Git ref to compile against (branch, tag, or commit SHA)
+        required: true
+        default: dev
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-linux-test:
+    name: Test C++ DSP core (Linux x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S native -B build -DCMAKE_BUILD_TYPE=Release -DKW_DSP_BUILD_TESTS=ON
+      - name: Build and test
+        run: |
+          cmake --build build --config Release --parallel 2
+          ctest --test-dir build --build-config Release --output-on-failure
+          ./build/KanataWarutsuDspTests
+      - name: Package Linux native backend
+        run: |
+          mkdir -p artifacts/native/linux-x64
+          cp build/libKanataWarutsuDsp.so artifacts/native/linux-x64/libKanataWarutsuDsp.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64
+          path: artifacts/native/linux-x64/libKanataWarutsuDsp.so
+          if-no-files-found: error
+          retention-days: 14
+
+  native-windows:
+    name: Build Windows native DLL (no executable output)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S native -B build -A x64 -DKW_DSP_BUILD_TESTS=OFF
+      - name: Build shared library only
+        run: cmake --build build --config Release --target KanataWarutsuDsp --parallel 2
+      - name: Package Windows DLL
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/native/win-x64 | Out-Null
+          Copy-Item build/Release/KanataWarutsuDsp.dll artifacts/native/win-x64/KanataWarutsuDsp.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-win-x64
+          path: artifacts/native/win-x64/KanataWarutsuDsp.dll
+          if-no-files-found: error
+          retention-days: 14
+
+  native-android:
+    name: Build Android ARM64 native backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Configure Android ARM64
+        run: >-
+          cmake -S native -B build-android
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=arm64-v8a
+          -DANDROID_PLATFORM=android-21
+          -DANDROID_STL=c++_static
+          -DKW_DSP_BUILD_TESTS=OFF
+      - name: Build Android shared library only
+        run: cmake --build build-android --config Release --target KanataWarutsuDsp --parallel 2
+      - name: Package Android backend
+        run: |
+          mkdir -p artifacts/native/android-arm64
+          cp build-android/libKanataWarutsuDsp.so artifacts/native/android-arm64/libKanataWarutsuDsp.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-android-arm64
+          path: artifacts/native/android-arm64/libKanataWarutsuDsp.so
+          if-no-files-found: error
+          retention-days: 14
+
+  managed-plugin:
+    name: Build portable OpenUtau Mobile plugin DLL
+    runs-on: windows-latest
+    needs: [ native-linux-test, native-windows, native-android ]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout OpenUtau Mobile API source
+        uses: actions/checkout@v4
+        with:
+          repository: vocoder712/OpenUtauMobile
+          ref: ${{ inputs.mobile_ref || 'dev' }}
+          path: _deps/OpenUtauMobile
+          # Public source checkout; this is not a private fork API assumption.
+      - name: Detect host target framework
+        id: framework
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD '_deps/OpenUtauMobile'
+          $candidates = @(
+            (Join-Path $root 'OpenUtau.Core/OpenUtau.Core.csproj'),
+            (Join-Path $root 'Directory.Build.props'),
+            (Join-Path $root 'Directory.Build.targets')
+          )
+          $tfm = $null
+          foreach ($file in $candidates) {
+            if (!(Test-Path $file)) { continue }
+            $content = Get-Content $file -Raw
+            $m = [regex]::Match($content, '<TargetFramework>\s*([^<\s]+)\s*</TargetFramework>')
+            if ($m.Success) {
+              $candidate = $m.Groups[1].Value
+              $tfm = [regex]::Match($candidate, 'net[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?').Value
+              if ($tfm) { break }
+            }
+            $m = [regex]::Match($content, '<TargetFrameworks>\s*([^<]+)\s*</TargetFrameworks>')
+            if ($m.Success) {
+              $frameworks = $m.Groups[1].Value -split ';'
+              $portable = $frameworks | Where-Object { $_ -match '^net[0-9]+\.[0-9]+$' } | Select-Object -First 1
+              $candidate = if ($portable) { $portable } else { $frameworks[0] }
+              $tfm = [regex]::Match($candidate, 'net[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?').Value
+              if ($tfm) { break }
+            }
+          }
+          if (!$tfm) {
+            $props = Get-ChildItem $root -Recurse -File -Include '*.props','*.csproj' | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
+            foreach ($file in $props) {
+              $content = Get-Content $file.FullName -Raw
+              $m = [regex]::Match($content, '<TargetFramework>\s*([^<\s]+)\s*</TargetFramework>')
+              if ($m.Success) {
+                $tfm = [regex]::Match($m.Groups[1].Value, 'net[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?').Value
+                if ($tfm) { break }
+              }
+            }
+          }
+          if (!$tfm) { throw 'Could not detect the OpenUtau Mobile Core TargetFramework. Inspect the upstream project and update this workflow.' }
+          $major = [regex]::Match($tfm, '^net([0-9]+)\.').Groups[1].Value
+          "tfm=$tfm" >> $env:GITHUB_OUTPUT
+          "sdk=$major.0.x" >> $env:GITHUB_OUTPUT
+          Write-Host "Building against OpenUtau Mobile TargetFramework=$tfm with .NET SDK $major.0.x"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.framework.outputs.sdk }}
+      - name: Install Android workload if the host Core is Android-targeted
+        if: contains(steps.framework.outputs.tfm, '-android')
+        run: dotnet workload install android
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-win-x64
+          path: artifacts/native/win-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-android-arm64
+          path: artifacts/native/android-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64
+          path: artifacts/native/linux-x64
+      - name: Verify all native backend inputs exist
+        shell: pwsh
+        run: |
+          $required = @(
+            'artifacts/native/win-x64/KanataWarutsuDsp.dll',
+            'artifacts/native/android-arm64/libKanataWarutsuDsp.so',
+            'artifacts/native/linux-x64/libKanataWarutsuDsp.so'
+          )
+          foreach ($file in $required) {
+            if (!(Test-Path $file)) { throw "Required native backend is missing: $file" }
+          }
+      - name: Restore and build managed renderer DLL
+        shell: pwsh
+        run: |
+          $mobile = Join-Path $PWD '_deps/OpenUtauMobile'
+          dotnet restore plugin/KanataWarutsuResampler.OpenUtau.csproj `
+            "-p:OpenUtauMobilePath=$mobile" `
+            "-p:TargetFramework=${{ steps.framework.outputs.tfm }}"
+          dotnet build plugin/KanataWarutsuResampler.OpenUtau.csproj `
+            --configuration Release --no-restore `
+            "-p:OpenUtauMobilePath=$mobile" `
+            "-p:TargetFramework=${{ steps.framework.outputs.tfm }}"
+      - name: Stage single-file plugin DLL
+        shell: pwsh
+        run: |
+          $tfm = '${{ steps.framework.outputs.tfm }}'
+          $dll = Join-Path $PWD "plugin/bin/Release/$tfm/KanataWarutsuResampler.OpenUtau.dll"
+          if (!(Test-Path $dll)) { throw "Plugin DLL was not produced at $dll" }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item $dll release/KanataWarutsuResampler.OpenUtau.dll
+          Copy-Item README.md release/README.md
+          Get-Item release/KanataWarutsuResampler.OpenUtau.dll | Format-List Name,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KanataWarutsuResampler-OpenUtau-Mobile-DLL
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish GitHub Release for version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/KanataWarutsuResampler.OpenUtau.dll
+            release/README.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
