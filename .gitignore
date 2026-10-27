@@ -1,0 +1,9 @@
+/build/
+/build-*/
+/plugin/bin/
+/plugin/obj/
+/_deps/
+/artifacts/
+/release/
+*.user
+*.suo
