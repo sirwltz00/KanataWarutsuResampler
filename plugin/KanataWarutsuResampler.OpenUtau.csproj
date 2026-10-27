@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- CI overrides TargetFramework to match the checked-out OpenUtau Mobile Core. -->
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>KanataWarutsuResampler.OpenUtau</AssemblyName>
+    <RootNamespace>KanataWarutsu.Resampler</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <OpenUtauMobilePath Condition="'$(OpenUtauMobilePath)' == ''">$(MSBuildThisFileDirectory)..\_deps\OpenUtauMobile</OpenUtauMobilePath>
+    <NativeArtifactsPath Condition="'$(NativeArtifactsPath)' == ''">$(MSBuildThisFileDirectory)..\artifacts\native</NativeArtifactsPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(OpenUtauMobilePath)\OpenUtau.Core\OpenUtau.Core.csproj" Private="false" />
+  </ItemGroup>
+
+  <!-- The final deliverable is one managed DLL. Native backends are embedded resources,
+       extracted into app-private temporary storage at runtime. The host's OpenUtau.Core.dll
+       must NOT be copied into the resampler package. -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(NativeArtifactsPath)\win-x64\KanataWarutsuDsp.dll"
+                      LogicalName="KanataWarutsu.Native.win-x64.bin"
+                      Condition="Exists('$(NativeArtifactsPath)\win-x64\KanataWarutsuDsp.dll')" />
+    <EmbeddedResource Include="$(NativeArtifactsPath)\android-arm64\libKanataWarutsuDsp.so"
+                      LogicalName="KanataWarutsu.Native.android-arm64.bin"
+                      Condition="Exists('$(NativeArtifactsPath)\android-arm64\libKanataWarutsuDsp.so')" />
+    <EmbeddedResource Include="$(NativeArtifactsPath)\linux-x64\libKanataWarutsuDsp.so"
+                      LogicalName="KanataWarutsu.Native.linux-x64.bin"
+                      Condition="Exists('$(NativeArtifactsPath)\linux-x64\libKanataWarutsuDsp.so')" />
+  </ItemGroup>
+</Project>
